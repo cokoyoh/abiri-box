@@ -1,0 +1,9 @@
+ip: 192.168.56.56
+
+folders:
+  - map: ~/code
+    to: /home/vagrant/code
+
+sites:
+  - map: tabiri-server.test
+    to: /home/vagrant/code/tabiri/server
