@@ -19,16 +19,21 @@ Vagrant.configure("2") do |config|
   # Provision inside VM
   config.vm.provision "shell", path: "provision.sh", args: [settings["ip"]]
 
-  # Provision on host to update /etc/hosts
-  config.vm.provision "host", type: "shell", run: "always" do |s|
-    domains = settings["sites"].map { |site| site["map"] }
-    domains.each do |domain|
-      s.inline = <<-SHELL
-        if ! grep -q "#{settings['ip']} #{domain}" /etc/hosts; then
-          echo "Adding #{domain} to host /etc/hosts"
-          echo "#{settings['ip']} #{domain}" | sudo tee -a /etc/hosts > /dev/null
+  # Update host's /etc/hosts
+  config.vm.provision "shell", privileged: false, run: "always" do |s|
+    hosts_entries = settings["sites"].map do |site|
+      "#{settings["ip"]} #{site["map"]}"
+    end.join("\n")
+
+    s.inline = <<-SHELL
+      echo "Updating host /etc/hosts..."
+      TEMP_FILE=$(mktemp)
+      cp /etc/hosts $TEMP_FILE
+      for entry in "#{hosts_entries}"; do
+        if ! grep -q "$entry" /etc/hosts; then
+          echo "$entry" | sudo tee -a /etc/hosts > /dev/null
         fi
-      SHELL
-    end
+      done
+    SHELL
   end
 end
