@@ -8,32 +8,34 @@ config_file = File.expand_path("abiri.yaml", __dir__)
 settings = YAML.load_file(config_file)
 
 Vagrant.configure("2") do |config|
-  config.vm.box = "ubuntu/focal64"
-  config.vm.network "private_network", ip: settings["ip"]
+  # ARM64 Ubuntu box from Parallels
+  config.vm.box = "parallels/ubuntu-16.04"
 
-  # Sync folders
-  settings["folders"].each do |folder|
-    config.vm.synced_folder folder["map"], folder["to"], type: "virtualbox"
+  # Use Parallels instead of VirtualBox
+  config.vm.provider "parallels" do |prl|
+    prl.memory = 2048
+    prl.cpus = 2
   end
 
-  # Provision inside VM
-  config.vm.provision "shell", path: "provision.sh", args: [settings["ip"]]
+  # Network setup
+  config.vm.network "forwarded_port", guest: 80, host: 8080
+  config.vm.network "forwarded_port", guest: 5432, host: 5432
 
-  # Update host's /etc/hosts
-  config.vm.provision "shell", privileged: false, run: "always" do |s|
-    hosts_entries = settings["sites"].map do |site|
-      "#{settings["ip"]} #{site["map"]}"
-    end.join("\n")
+  # Provisioning script
+  config.vm.provision "shell", inline: <<-SHELL
+    sudo apt-get update -y
 
-    s.inline = <<-SHELL
-      echo "Updating host /etc/hosts..."
-      TEMP_FILE=$(mktemp)
-      cp /etc/hosts $TEMP_FILE
-      for entry in "#{hosts_entries}"; do
-        if ! grep -q "$entry" /etc/hosts; then
-          echo "$entry" | sudo tee -a /etc/hosts > /dev/null
-        fi
-      done
-    SHELL
-  end
+    # Install PostgreSQL
+    sudo apt-get install -y postgresql postgresql-contrib
+    sudo systemctl enable postgresql
+    sudo systemctl start postgresql
+
+    # Set default password for postgres user
+    sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'password';"
+
+    # Install Nginx
+    sudo apt-get install -y nginx
+    sudo systemctl enable nginx
+    sudo systemctl start nginx
+  SHELL
 end
