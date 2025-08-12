@@ -47,6 +47,17 @@ EOF
     fi
 done <<< "$SITES"
 
+echo "🗄 Creating PostgreSQL databases from abiri.yaml..."
+DBS=$(ruby -ryaml -e "puts YAML.load_file('abiri.yaml')['databases'].map { |db| db['name'] }")
+for db in $DBS; do
+    if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='${db}'" | grep -q 1; then
+        echo "📂 Creating database: $db"
+        sudo -u postgres createdb "$db"
+    else
+        echo "✅ Database already exists: $db"
+    fi
+done
+
 echo "🔄 Restarting Nginx..."
 sudo systemctl restart nginx
 

@@ -7,3 +7,8 @@ folders:
 sites:
   - map: tabiri-server.test
     to: /home/vagrant/code/tabiri/server
+
+databases:
+  - name: tabiri
+    user: vagrant
+    password: secret
