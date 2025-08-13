@@ -1,50 +1,52 @@
 #!/usr/bin/env bash
 set -e
 
-IP="$1"
+IP="${1:-127.0.0.1}"  # fallback IP
 
 echo "📦 Updating package lists..."
 sudo apt-get update -y
 
 echo "🛠 Installing base packages..."
-sudo apt-get install -y \
-    curl unzip git build-essential ruby
+sudo apt-get install -y curl unzip git build-essential ruby
 
 echo "📦 Installing Node.js (LTS) + TypeScript..."
 curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
 sudo apt-get install -y nodejs
 sudo npm install -g typescript
 
-echo "👤 Setting vagrant password..."
-echo "vagrant:secret" | sudo chpasswd
-
-echo "🛠 Installing services from abiri.yaml..."
-ruby -ryaml -e "
+# ----------------------------
+# Install services from abiri.yaml
+# ----------------------------
+echo "🛠 Installing services..."
+mapfile -t SERVICES < <(ruby -ryaml -e "
 require 'yaml'
-YAML.load_file('abiri.yaml')['services'].each do |svc|
-  puts svc['name']
-end
-" | while read -r SERVICE; do
+YAML.load_file('abiri.yaml')['services'].each { |s| puts s['name'] }
+")
+for SERVICE in "${SERVICES[@]}"; do
     echo "📦 Installing service: $SERVICE"
     sudo apt-get install -y "$SERVICE"
 done
 
-echo "🌐 Configuring sites from abiri.yaml..."
-ruby -ryaml -e "
+# ----------------------------
+# Configure sites
+# ----------------------------
+echo "🌐 Configuring sites..."
+mapfile -t SITES < <(ruby -ryaml -e "
 require 'yaml'
-sites = YAML.load_file('abiri.yaml')['sites']
-sites.each do |s|
-  puts \"#{s['map']} #{s['to']}\"
-end
-" | while read -r domain path; do
-    sudo mkdir -p "$path"
-    sudo chown -R vagrant:vagrant "$path"
+YAML.load_file('abiri.yaml')['sites'].each { |s| puts \"#{s['map']} #{s['to']}\" }
+")
+for SITE in "${SITES[@]}"; do
+    DOMAIN=$(echo "$SITE" | awk '{print $1}')
+    PATH=$(echo "$SITE" | awk '{print $2}')
 
-    sudo tee /etc/nginx/sites-available/$domain > /dev/null <<EOF
+    sudo mkdir -p "$PATH"
+    sudo chown -R vagrant:vagrant "$PATH"
+
+    sudo tee /etc/nginx/sites-available/$DOMAIN > /dev/null <<EOF
 server {
     listen 80;
-    server_name $domain;
-    root $path;
+    server_name $DOMAIN;
+    root $PATH;
 
     location / {
         proxy_pass http://localhost:4000;
@@ -57,39 +59,63 @@ server {
 }
 EOF
 
-    sudo ln -sf /etc/nginx/sites-available/$domain /etc/nginx/sites-enabled/$domain
+    sudo ln -sf /etc/nginx/sites-available/$DOMAIN /etc/nginx/sites-enabled/$DOMAIN
 
-    if ! grep -q "$IP $domain" /etc/hosts; then
-        echo "$IP $domain" | sudo tee -a /etc/hosts > /dev/null
+    if ! grep -q "$IP $DOMAIN" /etc/hosts; then
+        echo "$IP $DOMAIN" | sudo tee -a /etc/hosts > /dev/null
     fi
 done
 
-echo "🗄 Creating PostgreSQL databases (if not exists) from abiri.yaml..."
-ruby -ryaml -e "
+# ----------------------------
+# PostgreSQL setup
+# ----------------------------
+echo "🗄 Ensuring PostgreSQL roles and databases..."
+sudo apt-get install -y postgresql postgresql-contrib
+sudo systemctl enable postgresql
+sudo systemctl start postgresql
+
+# Ensure 'vagrant' role exists with LOGIN
+if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='vagrant'" | grep -q 1; then
+    sudo -u postgres psql -c "CREATE ROLE vagrant WITH LOGIN PASSWORD 'secret';"
+fi
+
+# Set md5 auth for local connections
+sudo sed -i "s/^local\s\+all\s\+all\s\+peer/local all all md5/" /etc/postgresql/*/main/pg_hba.conf
+sudo systemctl restart postgresql
+
+# Create databases and users from abiri.yaml
+mapfile -t DB_ENTRIES < <(ruby -ryaml -e "
 require 'yaml'
-YAML.load_file('abiri.yaml')['databases'].each do |db|
-  puts \"#{db['name']} #{db['user']} #{db['password']}\"
-end
-" | while read -r DB USER PASS; do
+YAML.load_file('abiri.yaml')['databases'].each { |db| puts \"#{db['name']} #{db['user']} #{db['password']}\" }
+")
+
+for ENTRY in "${DB_ENTRIES[@]}"; do
+    DB=$(echo "$ENTRY" | awk '{print $1}')
+    USER=$(echo "$ENTRY" | awk '{print $2}')
+    PASS=$(echo "$ENTRY" | awk '{print $3}')
+
+    # Create user if missing
+    if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='${USER}'" | grep -q 1; then
+        echo "👤 Creating user $USER"
+        sudo -u postgres psql -c "CREATE ROLE ${USER} WITH LOGIN PASSWORD '${PASS}';"
+    fi
+
+    # Create database if missing
     if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='${DB}'" | grep -q 1; then
-        echo "📀 Creating database: $DB"
-        sudo -u postgres createdb "$DB"
-        sudo -u postgres psql -c "ALTER USER ${USER} WITH PASSWORD '${PASS}';"
-        sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE ${DB} TO ${USER};"
-    else
-        echo "✅ Database already exists: $DB"
+        echo "📀 Creating database $DB owned by $USER"
+        sudo -u postgres createdb "$DB" -O "$USER"
     fi
+
+    sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE ${DB} TO ${USER};"
 done
 
-echo "🔄 Restarting services from abiri.yaml..."
-ruby -ryaml -e "
-require 'yaml'
-YAML.load_file('abiri.yaml')['services'].each do |svc|
-  puts svc['name']
-end
-" | while read -r SERVICE; do
-    echo "🔄 Restarting $SERVICE"
+# ----------------------------
+# Restart services
+# ----------------------------
+echo "🔄 Restarting services..."
+for SERVICE in "${SERVICES[@]}"; do
     sudo systemctl restart "$SERVICE"
 done
 
-echo "✅ Provision complete!"
+echo "✅ Provisioning complete!"
+echo "ℹ️ You can now connect using: psql -U vagrant -d <database> -W"
