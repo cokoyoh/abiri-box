@@ -1,18 +1,26 @@
 #!/usr/bin/env bash
 set -e
 
-IP="${1:-127.0.0.1}"  # fallback IP
+# ----------------------------
+# Ensure core utilities are found
+# ----------------------------
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
+IP="${1:-127.0.0.1}"
+
+# ----------------------------
+# Update and install base packages
+# ----------------------------
 echo "📦 Updating package lists..."
-sudo apt-get update -y
+/usr/bin/apt-get update -y
 
 echo "🛠 Installing base packages..."
-sudo apt-get install -y curl unzip git build-essential ruby
+/usr/bin/apt-get install -y curl unzip git build-essential ruby sudo
 
-echo "📦 Installing Node.js (LTS) + TypeScript..."
-curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
-sudo apt-get install -y nodejs
-sudo npm install -g typescript
+echo "📦 Installing Node.js + TypeScript..."
+curl -fsSL https://deb.nodesource.com/setup_lts.x | /usr/bin/sudo -E bash -
+/usr/bin/apt-get install -y nodejs
+/usr/bin/npm install -g typescript
 
 # ----------------------------
 # Install services from abiri.yaml
@@ -20,11 +28,11 @@ sudo npm install -g typescript
 echo "🛠 Installing services..."
 mapfile -t SERVICES < <(ruby -ryaml -e "
 require 'yaml'
-YAML.load_file('abiri.yaml')['services'].each { |s| puts s['name'] }
+YAML.load_file('/vagrant/abiri.yaml')['services'].each { |s| puts s['name'] }
 ")
 for SERVICE in "${SERVICES[@]}"; do
     echo "📦 Installing service: $SERVICE"
-    sudo apt-get install -y "$SERVICE"
+/usr/bin/apt-get install -y "$SERVICE"
 done
 
 # ----------------------------
@@ -33,20 +41,20 @@ done
 echo "🌐 Configuring sites..."
 mapfile -t SITES < <(ruby -ryaml -e "
 require 'yaml'
-YAML.load_file('abiri.yaml')['sites'].each { |s| puts \"#{s['map']} #{s['to']}\" }
+YAML.load_file('/vagrant/abiri.yaml')['sites'].each { |s| puts \"#{s['map']} #{s['to']}\" }
 ")
 for SITE in "${SITES[@]}"; do
     DOMAIN=$(echo "$SITE" | awk '{print $1}')
-    PATH=$(echo "$SITE" | awk '{print $2}')
+    PATH_DIR=$(echo "$SITE" | awk '{print $2}')
 
-    sudo mkdir -p "$PATH"
-    sudo chown -R vagrant:vagrant "$PATH"
+    /bin/mkdir -p "$PATH_DIR"
+/bin/chown -R vagrant:vagrant "$PATH_DIR"
 
-    sudo tee /etc/nginx/sites-available/$DOMAIN > /dev/null <<EOF
+/usr/bin/tee /etc/nginx/sites-available/$DOMAIN > /dev/null <<EOF
 server {
     listen 80;
     server_name $DOMAIN;
-    root $PATH;
+    root $PATH_DIR;
 
     location / {
         proxy_pass http://localhost:4000;
@@ -59,63 +67,57 @@ server {
 }
 EOF
 
-    sudo ln -sf /etc/nginx/sites-available/$DOMAIN /etc/nginx/sites-enabled/$DOMAIN
+/bin/ln -sf /etc/nginx/sites-available/$DOMAIN /etc/nginx/sites-enabled/$DOMAIN
 
-    if ! grep -q "$IP $DOMAIN" /etc/hosts; then
-        echo "$IP $DOMAIN" | sudo tee -a /etc/hosts > /dev/null
-    fi
+grep -q "$IP $DOMAIN" /etc/hosts || echo "$IP $DOMAIN" >> /etc/hosts
 done
+
+/bin/systemctl reload nginx
 
 # ----------------------------
 # PostgreSQL setup
 # ----------------------------
-echo "🗄 Ensuring PostgreSQL roles and databases..."
-sudo apt-get install -y postgresql postgresql-contrib
-sudo systemctl enable postgresql
-sudo systemctl start postgresql
+echo "🗄 Installing PostgreSQL..."
+/usr/bin/apt-get install -y postgresql postgresql-contrib
+/bin/systemctl enable postgresql
+/bin/systemctl start postgresql
 
-# Ensure 'vagrant' role exists with LOGIN
-if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='vagrant'" | grep -q 1; then
-    sudo -u postgres psql -c "CREATE ROLE vagrant WITH LOGIN PASSWORD 'secret';"
-fi
+# Switch peer -> md5 auth for local connections
+/bin/sed -i "s/^local\s\+all\s\+all\s\+peer/local all all md5/" /etc/postgresql/*/main/pg_hba.conf
+/bin/systemctl restart postgresql
+/bin/sleep 5
 
-# Set md5 auth for local connections
-sudo sed -i "s/^local\s\+all\s\+all\s\+peer/local all all md5/" /etc/postgresql/*/main/pg_hba.conf
-sudo systemctl restart postgresql
+# Ensure 'vagrant' role exists
+/usr/bin/sudo -u postgres /usr/bin/psql -tc "SELECT 1 FROM pg_roles WHERE rolname='vagrant'" | /bin/grep -q 1 || \
+    /usr/bin/sudo -u postgres /usr/bin/psql -c "CREATE ROLE vagrant WITH LOGIN PASSWORD 'secret';"
 
 # Create databases and users from abiri.yaml
-mapfile -t DB_ENTRIES < <(ruby -ryaml -e "
+ruby -ryaml -e "
 require 'yaml'
-YAML.load_file('abiri.yaml')['databases'].each { |db| puts \"#{db['name']} #{db['user']} #{db['password']}\" }
-")
+dbs = YAML.load_file('/vagrant/abiri.yaml')['databases']
+dbs.each do |d|
+  name = d['name']
+  user = d['user']
+  pass = d['password']
 
-for ENTRY in "${DB_ENTRIES[@]}"; do
-    DB=$(echo "$ENTRY" | awk '{print $1}')
-    USER=$(echo "$ENTRY" | awk '{print $2}')
-    PASS=$(echo "$ENTRY" | awk '{print $3}')
+  # Create role if missing
+  system(\"/usr/bin/sudo -u postgres /usr/bin/psql -tc \\\"SELECT 1 FROM pg_roles WHERE rolname='#{user}'\\\" | /bin/grep -q 1 || /usr/bin/sudo -u postgres /usr/bin/psql -c \\\"CREATE ROLE #{user} WITH LOGIN PASSWORD '#{pass}';\\\"\")
 
-    # Create user if missing
-    if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='${USER}'" | grep -q 1; then
-        echo "👤 Creating user $USER"
-        sudo -u postgres psql -c "CREATE ROLE ${USER} WITH LOGIN PASSWORD '${PASS}';"
-    fi
+  # Create database if missing
+  system(\"/usr/bin/sudo -u postgres /usr/bin/psql -tc \\\"SELECT 1 FROM pg_database WHERE datname='#{name}'\\\" | /bin/grep -q 1 || /usr/bin/sudo -u postgres /usr/bin/createdb #{name} -O #{user}\")
 
-    # Create database if missing
-    if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='${DB}'" | grep -q 1; then
-        echo "📀 Creating database $DB owned by $USER"
-        sudo -u postgres createdb "$DB" -O "$USER"
-    fi
-
-    sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE ${DB} TO ${USER};"
-done
+  # Grant privileges
+  system(\"/usr/bin/sudo -u postgres /usr/bin/psql -c \\\"GRANT ALL PRIVILEGES ON DATABASE #{name} TO #{user};\\\"\")
+end
+"
 
 # ----------------------------
 # Restart services
 # ----------------------------
 echo "🔄 Restarting services..."
 for SERVICE in "${SERVICES[@]}"; do
-    sudo systemctl restart "$SERVICE"
+    /bin/systemctl restart "$SERVICE"
 done
 
 echo "✅ Provisioning complete!"
-echo "ℹ️ You can now connect using: psql -U vagrant -d <database> -W"
+echo "ℹ️ Connect using: psql -U vagrant -d <database> -W"

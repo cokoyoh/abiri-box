@@ -17,8 +17,11 @@ Vagrant.configure("2") do |config|
   config.vm.network "forwarded_port", guest: 80, host: 8080
   config.vm.network "forwarded_port", guest: 5432, host: 5432
 
-  # Insert Vagrant's default key
-  config.ssh.insert_key = true
+  config.ssh.password = "vagrant"
+  config.ssh.username = "vagrant"
+  config.ssh.insert_key = false
+  config.ssh.forward_agent = true
+
 
   # Always run provision.sh
   config.vm.provision "shell", path: "provision.sh", run: "always"
